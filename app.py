@@ -4,8 +4,8 @@ import plotly.graph_objects as go
 
 # ================= 页面配置 =================
 st.set_page_config(page_title="湖南园区光储充现货交易风险量化模型", layout="wide")
-st.title("⚡ 湖南省园区综合能源电价与现货交易风险量化模型 (专家版)")
-st.caption("湖南'水火互济'情景 ｜ 午间低谷分时套利 ｜ 冰冻周压力测试 ｜ CfD长协/现货对冲 ｜ '两个细则'偏差考核 ｜ EMC法律边界分析")
+st.title("⚡ 湖南省园区综合能源电价与现货交易风险量化模型 (专家版 v1.1)")
+st.caption("v1.1 修正：修复财务测算单位错配Bug (元/万元) ｜ 湖南'水火互济'情景 ｜ 冰冻周压力测试 ｜ CfD长协对冲 ｜ EMC法律边界")
 st.markdown("---")
 
 # ================= 侧边栏：园区参数（湖南园区） =================
@@ -47,19 +47,18 @@ ice_price_surge = st.sidebar.slider("冰冻周现货电价飙升 (%)", 0, 150, 6
 st.sidebar.markdown("---")
 st.sidebar.info("💡 专家提示：湖南电力'枯紧丰松'——冬季冰冻致出力骤降且电价飙升（罚款被放大），汛期水电挤压致弃光降价；午间低谷分时为储能提供套利空间。")
 
-# ================= 常量（修复grok版PV_HOURS未定义缺陷） =================
-PV_HOURS = 1000.0                      # 湖南光伏等效利用小时
+# ================= 常量 =================
+PV_HOURS = 1000.0                      
 LOAN_RATIO, LOAN_RATE, LOAN_TERM = 0.70, 0.068, 10
-PV_COST, ESS_COST, EV_COST = 280.0, 70.0, 700.0   # 万元/MW、万元/MWh、元/kW
-EV_HOURS, EV_FEE = 3.0, 0.45           # 充电桩日利用小时、服务费
+PV_COST, ESS_COST, EV_COST = 280.0, 70.0, 700.0   
+EV_HOURS, EV_FEE = 3.0, 0.45           
 
-# ================= 30天小时级现货模拟（偏差考核+VaR） =================
+# ================= 30天小时级现货模拟 =================
 def simulate_spot(days=30):
     np.random.seed(42)
     hours = days * 24
     t = np.arange(hours)
     h = t % 24
-    # 湖南"鸭形曲线"：早高峰+晚高峰上浮，午间光伏大发下探
     daily_cycle = (np.where((h >= 7) & (h <= 9), 0.10, 0) +
                    np.where((h >= 17) & (h <= 22), 0.18, 0) -
                    np.where((h >= 11) & (h <= 15), 0.12, 0))
@@ -82,16 +81,18 @@ spot_prices, cfd_rev, spot_rev, penalty = simulate_spot()
 total_rev = cfd_rev.sum() + spot_rev.sum()
 total_penalty = penalty.sum()
 net_rev = total_rev - total_penalty
-dev_penalty_annual = total_penalty * (365 / 30)
 
-# ================= 20年全投资现金流（园区综合能源管理商口径） =================
+# 【修复】将元转换为万元
+dev_penalty_annual_wan = (total_penalty * (365 / 30)) / 10000 
+
+# ================= 20年全投资现金流 =================
 def build_20y():
     lp = np.array([0.5,0.45,0.42,0.4,0.45,0.55,0.75,0.95,1.05,1.1,1.05,0.95,0.9,0.88,0.92,0.98,1.08,1.15,1.1,0.95,0.8,0.7,0.6,0.55])
     pc = np.array([0,0,0,0,0,0.05,0.15,0.35,0.65,0.85,0.98,1.0,0.95,0.98,0.85,0.6,0.3,0.15,0.05,0,0,0,0,0])
     h24 = np.arange(24)
     hourly_load = lp / lp.sum() * (park_total_elec * 10000 / 365)
     pv_share = pc / pc.sum()
-    charge_mask = (h24 <= 5) | ((h24 >= 12) & (h24 <= 13))   # 凌晨谷段+午间低谷充电
+    charge_mask = (h24 <= 5) | ((h24 >= 12) & (h24 <= 13))
 
     capex = pv_cap * PV_COST + ess_cap * ESS_COST + ev_cap * EV_COST / 10000
     loan = capex * LOAN_RATIO
@@ -119,7 +120,8 @@ def build_20y():
         y_ess_rev = actual_ess * 330 * weighted_spread / 10000
 
         gross = (y_pv_rev + y_ess_rev) * annual_factor + demand_rev + ev_rev
-        net_full = gross - (pv_cap * 5 + 30) - dev_penalty_annual
+        # 【修复】统一使用万元单位扣减罚款
+        net_full = gross - (pv_cap * 5 + 30) - dev_penalty_annual_wan 
         cum += net_full
         cum_list.append(cum)
         if payback is None and cum >= capex:
@@ -144,8 +146,12 @@ ice_rev = A_week * cfd_ratio * cfd_price + A_week * (1 - cfd_ratio) * surge_pric
 ice_dev = np.maximum(0, (F_week - A_week) - deviation_threshold * F_week)
 ice_penalty = ice_dev * surge_price * penalty_multiplier
 ice_net = ice_rev - ice_penalty
+
+# 【修复】统一转换为万元
+ice_net_wan = ice_net / 10000
+ice_penalty_wan = ice_penalty / 10000
 normal_week = avg_net / 52
-ice_shrink = (normal_week - ice_net) / normal_week * 100 if normal_week > 0 else 0.0
+ice_shrink = (normal_week - ice_net_wan) / normal_week * 100 if normal_week > 0 else 0.0
 
 # ================= 前端可视化 =================
 r1c1, r1c2, r1c3, r1c4 = st.columns(4)
@@ -155,9 +161,9 @@ r1c3.metric("20年均税前净利润", f"{avg_net:.0f} 万元/年")
 r1c4.metric("20年累计股东净收益", f"{cum_share:.0f} 万元", "扣除70%贷款摊还")
 
 r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-r2c1.metric("偏差考核年罚款期望", f"{dev_penalty_annual:.1f} 万元", "⚠️ 风险敞口", delta_color="inverse")
+r2c1.metric("偏差考核年罚款期望", f"{dev_penalty_annual_wan:.1f} 万元", "⚠️ 风险敞口", delta_color="inverse")
 r2c2.metric("P5风险价值 (VaR95)", f"{var95:.2f} 万元", f"P5净收益 {p5:.1f} 万", delta_color="inverse")
-r2c3.metric("冰冻周净收益", f"{ice_net/10000:.2f} 万元", "⚠️ 罚款或超周收益", delta_color="inverse")
+r2c3.metric("冰冻周净收益", f"{ice_net_wan:.2f} 万元", "⚠️ 罚款或超周收益", delta_color="inverse")
 r2c4.metric("冰冻周收益缩水", f"{ice_shrink:.0f} %", delta_color="inverse")
 
 st.markdown("### 📉 20年累计净现金流与回本轨迹")
@@ -176,11 +182,11 @@ st.plotly_chart(fig_p, use_container_width=True)
 st.markdown("### 🌀 冰冻周极端压力测试 (湖南特色)")
 st.caption("情景：日前按正常天气申报，冰冻周光伏覆冰出力骤降，冬季紧供电价飙升，超死区偏差按飙升后实时电价×惩罚倍数考核。")
 sc1, sc2, sc3 = st.columns(3)
-sc1.metric("正常周净收益", f"{normal_week/10000:.2f} 万元")
-sc2.metric("冰冻周净收益", f"{ice_net/10000:.2f} 万元", delta_color="inverse")
-sc3.metric("冰冻周偏差罚款", f"{ice_penalty/10000:.2f} 万元", delta_color="inverse")
+sc1.metric("正常周净收益", f"{normal_week:.2f} 万元")
+sc2.metric("冰冻周净收益", f"{ice_net_wan:.2f} 万元", delta_color="inverse")
+sc3.metric("冰冻周偏差罚款", f"{ice_penalty_wan:.2f} 万元", delta_color="inverse")
 fig_ice = go.Figure(go.Bar(x=['正常周净收益', '冰冻周净收益', '冰冻周偏差罚款'],
-                           y=[normal_week/10000, ice_net/10000, ice_penalty/10000],
+                           y=[normal_week, ice_net_wan, ice_penalty_wan],
                            marker_color=['#16a34a', '#dc2626', '#f59e0b']))
 fig_ice.update_layout(height=350, yaxis_title="万元", template="plotly_white")
 st.plotly_chart(fig_ice, use_container_width=True)
@@ -188,7 +194,7 @@ st.plotly_chart(fig_ice, use_container_width=True)
 st.markdown("### ⚖️ 年度收益构成与偏差罚款瀑布图")
 fig_w = go.Figure(go.Waterfall(
     x=['光伏收益', '储能套利', '需量管理', '充电服务', '偏差罚款(扣除)'],
-    y=[y_pv, y_ess, y_dem, y_ev, -dev_penalty_annual],
+    y=[y_pv, y_ess, y_dem, y_ev, -dev_penalty_annual_wan],
     connector={"line": {"color": "rgb(63, 63, 63)"}}))
 fig_w.update_layout(title="年度现金流构成 (万元)", template="plotly_white")
 st.plotly_chart(fig_w, use_container_width=True)
@@ -211,7 +217,7 @@ else:
     st.warning(f"**⚠️ 激进型敞口**：长协仅 **{cfd_ratio*100:.0f}%**。湖南汛期现货价格可能长期低于光伏全成本，建议提升至 70%-85%，并用储能滚动平抑偏差。")
 
 st.subheader("2. 偏差考核风险量化与应对")
-st.error(f"**风险警告**：偏差考核年罚款期望 **{dev_penalty_annual:.1f} 万元**；冰冻周情景下罚款高达 **{ice_penalty/10000:.2f} 万元**（高实时电价放大惩罚）。应对：AI超短期功率预测（误差<3%）+ 储能实时平抑 + 依据湖南'两个细则'申请冰冻等极端天气考核豁免。")
+st.error(f"**风险警告**：偏差考核年罚款期望 **{dev_penalty_annual_wan:.1f} 万元**；冰冻周情景下罚款高达 **{ice_penalty_wan:.2f} 万元**（高实时电价放大惩罚）。应对：AI超短期功率预测（误差<3%）+ 储能实时平抑 + 依据湖南'两个细则'申请冰冻等极端天气考核豁免。")
 
 st.subheader("3. 法律边界与 EMC 合同风险传导")
 st.info("**⚖️ 湖南综合能源管理商合规提示**")
