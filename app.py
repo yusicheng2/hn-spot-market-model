@@ -1,330 +1,315 @@
 import streamlit as st
+import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="湖南园区光储充现货交易风险量化模型", layout="wide")
-
-# 满足要求2：将右侧指标数值字体调小，允许换行，不再显示省略号
-st.markdown('''
-<style>
-div[data-testid="stMetricValue"] {
-    font-size: 22px !important;
-    white-space: normal !important;
-    word-break: break-word !important;
-    overflow: visible !important;
-    text-overflow: unset !important;
-}
-</style>
-''', unsafe_allow_html=True)
-
-st.title("⚡ 湖南省园区综合能源电价与现货交易风险量化模型 (第四监管周期版 v1.4)")
-st.caption("v1.4 升级：适配增量光伏余电上网“二选一”结算方案（竞价机制电价 vs 全现货） ｜ 现货极寒行情校准")
+st.set_page_config(page_title="广东园区光储现货交易风险量化模型", layout="wide")
+st.title("⚡ 广东省园区综合能源现货交易风险量化与对冲模型 (专家版 v4.0)")
+st.caption("v4.0 核心调优：园区收益分成刚性成本全量剥离 ｜ 20年累计支出显化 ｜ 深度法律与合规风险穿透分析")
 st.markdown("---")
 
-# ================= 侧边栏：园区参数（湖南园区） =================
-st.sidebar.header("📊 园区参数设定")
+# ================= 侧边栏：参数输入 =================
+st.sidebar.header("📊 园区资产与交易参数设定")
 
-st.sidebar.subheader("1. 物理资产与需量管理")
-trans_cap = st.sidebar.slider("变压器容量 (kVA)", 1000, 20000, 8000, 500)
-current_demand = st.sidebar.slider("当前月均申报需量 (kW)", 1000, 15000, 5000, 250)
-demand_reduction = st.sidebar.slider("需量压降目标 (kW)", 0, 2000, 800, 50)
-demand_price = st.sidebar.slider("需量电费单价 (元/kW·月)", 20.0, 60.0, 35.4, 0.5)
-
-# 满足要求1：将左侧年总用电量初始值由4500调整为2500
-park_total_elec = st.sidebar.slider("年总用电量 (万kWh/年)", 500, 20000, 2500, 500)
-
+st.sidebar.subheader("1. 物理资产参数")
 pv_cap = st.sidebar.slider("光伏装机 (MW)", 0.0, 20.0, 6.0, 0.5)
+# 修正基准：广东地区实际有效时长约1100小时
+pv_hours = st.sidebar.number_input("光伏年等效利用小时 (h)", value=1100, step=50)
 ess_cap = st.sidebar.slider("储能装机 (MWh)", 0.0, 50.0, 15.0, 1.0)
-ess_cycle = st.sidebar.slider("储能日循环次数", 0.5, 2.5, 1.9, 0.1)
-ev_cap = st.sidebar.slider("充电桩装机 (kW)", 0, 10000, 4000, 500)
-pv_deg = st.sidebar.slider("光伏年衰减率 (%)", 0.1, 2.0, 0.5, 0.1)
-ess_deg = st.sidebar.slider("储能年衰减率 (%)", 0.5, 5.0, 2.0, 0.5)
+ess_power = st.sidebar.slider("储能功率 (MW)", 0.0, 20.0, 5.0, 0.5)
+park_load = st.sidebar.slider("园区日均基础负荷 (MWh)", 10, 100, 45, 5)
 
-st.sidebar.subheader("2. 湖南分时电价参数")
-spread_normal = st.sidebar.slider("常态峰谷价差 (元/kWh)", 0.3, 1.2, 0.824, 0.01)
-spread_peak = st.sidebar.slider("尖峰峰谷价差 (元/kWh)", 0.5, 1.6, 1.08, 0.01)
-price_flat = st.sidebar.slider("平段电价 (元/kWh)", 0.4, 1.0, 0.74, 0.01)
-price_valley = st.sidebar.slider("午间低谷电价 (元/kWh)", 0.1, 0.6, 0.33, 0.01)
+st.sidebar.subheader("1.5 园区电价参数")
+retail_price = st.sidebar.number_input("园区综合购电单价 (元/kWh)", value=0.75, step=0.01)
 
-st.sidebar.subheader("3. 增量光伏余电上网价格模式 (二选一)")
+st.sidebar.subheader("2. 增量光伏余电上网价格模式 (二选一)")
+# 修正表述：增量光伏项目上网电量的80%享受机制电价
 feed_mode = st.sidebar.radio(
     "光伏余电入市结算方案",
-    ["竞价成功：80%机制电价 + 20%现货", "未参与竞价：全额现货市场价"],
-    help="竞价成功者享受机制电价；未竞价者余电全额按现货结算。"
+    ["竞价成功：增量光伏项目上网电量的80%享受机制电价", "未参与竞价：全额现货市场价"],
+    help="依据广东现行政策，竞价成功者享受机制电价；否则余电全额按现货节点电价结算。"
 )
-mech_price = st.sidebar.number_input("机制电价 (元/kWh)", value=0.375, step=0.005)
-spot_mean = st.sidebar.slider("现货日前均价期望 (元/kWh)", 0.01, 0.55, 0.10, 0.01, help="参考：湖南26年4月、6月现货约0.075元，5月约0.15元")
+mech_price = st.sidebar.number_input("广东机制电价 (元/kWh)", value=0.453, step=0.005)
+spot_mean = st.sidebar.slider("现货日前市场均价期望 (元/kWh)", 0.15, 0.55, 0.25, 0.01)
 spot_sigma = st.sidebar.slider("现货价格波动率 (Sigma)", 0.05, 0.30, 0.15, 0.01)
 
-st.sidebar.subheader("4. 偏差考核 (湖南'两个细则'/现货规则)")
+st.sidebar.subheader("3. 偏差考核与风险参数 (双细则)")
 deviation_sigma = st.sidebar.slider("光伏预测误差标准差 (%)", 2.0, 20.0, 8.0, 1.0) / 100.0
 penalty_multiplier = st.sidebar.slider("偏差惩罚倍数 (实时电价)", 1.0, 3.0, 1.5, 0.1)
-deviation_threshold = st.sidebar.slider("免考核死区 (%)", 0.0, 10.0, 3.0, 0.5) / 100.0
+deviation_threshold = st.sidebar.slider("免考核死区 (%)", 0.0, 10.0, 5.0, 0.5) / 100.0
 
-st.sidebar.subheader("5. 年化校准与冰冻周压力测试")
-annual_factor = st.sidebar.slider("年化折算系数 (汛期弃光/受阻折减)", 0.60, 1.00, 0.80, 0.05)
-ice_pv_drop = st.sidebar.slider("冰冻周光伏出力骤降 (%)", 0, 90, 60, 5) / 100.0
-ice_price_surge = st.sidebar.slider("冰冻周现货电价飙升 (%)", 0, 150, 60, 5) / 100.0
+st.sidebar.subheader("4. 年化校准与压力情景")
+annual_factor = st.sidebar.slider("年化折算系数 (仅限台风季光伏折减)", 0.60, 1.00, 0.80, 0.05)
+typhoon_pv_drop = st.sidebar.slider("台风周光伏出力骤降 (%)", 0, 90, 60, 5) / 100.0
+typhoon_price_drop = st.sidebar.slider("台风周现货电价骤降 (%)", 0, 90, 70, 5) / 100.0
+
+# ================= 新增：园区收益分成模块 =================
+st.sidebar.subheader("5. 园区收益分成刚性成本 (二选一)")
+share_mode = st.sidebar.radio(
+    "收益分成计算模式",
+    ["模式一：按年总用电量分成", "模式二：按定额折扣优惠"]
+)
+
+if share_mode == "模式一：按年总用电量分成":
+    share_vol = st.sidebar.number_input("年用电量基准 (万kWh, 封顶4000)", min_value=0, max_value=4000, value=2500, step=100)
+    share_price = st.sidebar.number_input("度电单价让利 (元/kWh, 封顶0.10)", min_value=0.00, max_value=0.10, value=0.06, step=0.01)
+    annual_share_cost = share_vol * share_price  # 单位：万元
+else:
+    share_fixed = st.sidebar.number_input("年让利总金额 (万元, 封顶500)", min_value=0, max_value=500, value=150, step=10)
+    annual_share_cost = share_fixed  # 单位：万元
+
+st.sidebar.subheader("6. 衰减因子与刚性运营成本")
+pv_deg = st.sidebar.number_input("光伏组件年均衰减率 (%)", value=0.5, step=0.1)
+ess_deg = st.sidebar.number_input("储能电池年衰减率 (%)", value=2.0, step=0.1)
+dev_fee = st.sidebar.number_input("园区路条/前期开发费 (万元)", value=200, step=10)
+cont_fee = st.sidebar.number_input("不可预见费用 (万元)", value=50, step=10)
+land_rent = st.sidebar.number_input("场地租金 (万元/年)", value=10, step=1)
+pv_om = st.sidebar.number_input("光伏运维费 (万元/MW/年)", value=5, step=1)
+ess_om = st.sidebar.number_input("储能运维费 (万元/年)", value=20, step=1)
+
+st.sidebar.subheader("7. 储能工商业核心收益参数")
+ess_spread = st.sidebar.number_input("广东储能综合峰谷价差 (元/kWh)", value=1.15, step=0.01)
+ess_cycles = st.sidebar.number_input("储能日均循环次数", value=1.9, step=0.05)
+demand_price = st.sidebar.number_input("需量单价降本 (元/kW·月)", value=39.0, step=1.0)
 
 st.sidebar.markdown("---")
-st.sidebar.info("💡 专家提示：依据最新合规推演模型，增量光伏项目余电上网必须严格执行『竞价机制电价』或『全现货市场价』二选一；同时需量电费核定严格恪守 40% 变压器容量底线。")
+st.sidebar.info("💡 尽调提示：已强行将业主收益分成确认为刚性负债，并同步扣减于单月现金流、台风测试及全生命周期财务台账中。")
 
-# ================= 财务与工程常量 =================
-PV_HOURS = 1000.0                      
-LOAN_RATIO, LOAN_RATE, LOAN_TERM = 0.70, 0.045, 10 
-PV_COST, ESS_COST, EV_COST = 280.0, 70.0, 700.0    
-EV_HOURS, EV_FEE = 3.0, 0.45           
-
-# ================= 30天小时级现货模拟 =================
-def simulate_spot(days=30):
+# ================= 后端核心计算引擎（蒙特卡洛模拟） =================
+def simulate_market_and_risk(days=30, steps=24):
     np.random.seed(42)
-    hours = days * 24
+    hours = days * steps
     t = np.arange(hours)
-    h = t % 24
-    daily_cycle = (np.where((h >= 7) & (h <= 9), 0.10, 0) +
-                   np.where((h >= 17) & (h <= 22), 0.18, 0) -
-                   np.where((h >= 11) & (h <= 15), 0.12, 0))
-    spot_prices = np.clip(spot_mean + daily_cycle + np.random.normal(0, spot_sigma, hours), 0.0, 1.5)
 
-    if pv_cap > 0:
-        pv_curve = np.maximum(0, np.sin((h - 6) * np.pi / 12))
-        pv_gen = pv_cap * 1000 * pv_curve * 0.85
-        forecast = pv_gen
-        actual = pv_gen * np.maximum(0, (1 + np.random.normal(0, deviation_sigma, hours)))
+    daily_cycle = 0.15 * np.sin((t % 24 - 6) * np.pi / 12)
+    spot_prices = spot_mean + daily_cycle + np.random.normal(0, spot_sigma, hours)
+    spot_prices = np.clip(spot_prices, 0.0, 1.5)
 
-        deviation = np.abs(actual - forecast)
-        penalized = np.maximum(0, deviation - forecast * deviation_threshold)
-        penalty = penalized * spot_prices * penalty_multiplier
-
-        # 落实二选一结算策略
-        if feed_mode == "竞价成功：80%机制电价 + 20%现货":
-            mech_rev = actual * 0.8 * mech_price
-            spot_rev = actual * 0.2 * spot_prices
-        else:
-            mech_rev = np.zeros(hours)
-            spot_rev = actual * spot_prices
-            
-    else:
-        mech_rev = np.zeros(hours)
-        spot_rev = np.zeros(hours)
-        penalty = np.zeros(hours)
-
-    return spot_prices, mech_rev, spot_rev, penalty
-
-spot_prices, mech_rev, spot_rev, penalty = simulate_spot()
-total_rev = mech_rev.sum() + spot_rev.sum()
-total_penalty = penalty.sum()
-net_rev_30d = total_rev - total_penalty
-dev_penalty_annual_wan = (total_penalty * (365 / 30)) / 10000.0
-
-# ================= 20年全投资现金流模型 =================
-def build_20y():
-    lp = np.array([0.5,0.45,0.42,0.4,0.45,0.55,0.75,0.95,1.05,1.1,1.05,0.95,0.9,0.88,0.92,0.98,1.08,1.15,1.1,0.95,0.8,0.7,0.6,0.55])
-    pc = np.array([0,0,0,0,0,0.05,0.15,0.35,0.65,0.85,0.98,1.0,0.95,0.98,0.85,0.6,0.3,0.15,0.05,0,0,0,0,0])
-    h24 = np.arange(24)
-    hourly_load = lp / lp.sum() * (park_total_elec * 10000 / 365)
-    pv_share = pc / pc.sum()
-    charge_mask = (h24 <= 5) | ((h24 >= 12) & (h24 <= 13))
-
-    capex = pv_cap * PV_COST + ess_cap * ESS_COST + (ev_cap * EV_COST / 10000.0)
-    loan = capex * LOAN_RATIO
-    if loan > 0 and LOAN_RATE > 0:
-        k = LOAN_RATE * (1 + LOAN_RATE) ** LOAN_TERM / ((1 + LOAN_RATE) ** LOAN_TERM - 1)
-        annual_payment = loan * k
-    else:
-        annual_payment = 0.0
-
-    demand_floor = trans_cap * 0.4
-    max_allowable_reduction = max(0.0, current_demand - demand_floor)
-    actual_red = min(float(demand_reduction), max_allowable_reduction)
-    demand_rev = actual_red * demand_price * 12 / 10000.0
-
-    ev_rev = (ev_cap * EV_HOURS * EV_FEE * 335 / 10000.0) if ev_cap > 0 else 0.0
-    weighted_spread = (8 / 12) * spread_normal + (4 / 12) * spread_peak
-
-    cum, cum_share, payback, cum_list = 0.0, 0.0, None, []
-    om_cost = (pv_cap * 3.5) + (ess_cap * 1.5) + (ev_cap * EV_COST / 10000.0 * 0.02) + (5.0 if capex > 0 else 0.0)
-
-    # 确定年度余电上网均价
-    if feed_mode == "竞价成功：80%机制电价 + 20%现货":
-        export_price_annual = 0.8 * mech_price + 0.2 * spot_mean
-    else:
-        export_price_annual = spot_mean
-
-    for y in range(1, 21):
-        deg_pv = (1 - pv_deg / 100.0) ** (y - 1) if pv_cap > 0 else 0.0
-        deg_ess = (1 - ess_deg / 100.0) ** (y - 1) if ess_cap > 0 else 0.0
-        
-        if pv_cap > 0:
-            pv_h = pv_cap * 1000 * (PV_HOURS / 365.0) * deg_pv * pv_share
-            self_use = np.minimum(pv_h, hourly_load)
-            export = np.minimum(np.maximum(0.0, pv_h - hourly_load), trans_cap * 0.5)
-            y_pv_rev = ((self_use * price_flat).sum() + (export * export_price_annual).sum()) * 365.0 / 10000.0
-        else:
-            self_use = np.zeros(24)
-            y_pv_rev = 0.0
-
-        if ess_cap > 0:
-            max_charge = np.sum(np.where(charge_mask, np.minimum(ess_cap * 500.0, np.maximum(0.0, trans_cap * 0.9 - hourly_load + self_use)), 0.0))
-            max_discharge = np.sum(np.where(~charge_mask, np.minimum(hourly_load - self_use, ess_cap * 500.0), 0.0))
-            actual_ess = min(ess_cap * 1000.0 * ess_cycle * 0.85 * deg_ess, max_discharge, max_charge * 0.85)
-            y_ess_rev = actual_ess * 330.0 * weighted_spread / 10000.0
-        else:
-            y_ess_rev = 0.0
-
-        gross = (y_pv_rev + y_ess_rev) * annual_factor + demand_rev + ev_rev
-        net_full = gross - om_cost - dev_penalty_annual_wan
-        cum += net_full
-        cum_list.append(cum)
-
-        if payback is None and capex > 0 and cum >= capex:
-            payback = y
-        cum_share += net_full - (annual_payment if y <= LOAN_TERM else 0.0)
-
-    payback_display = "无新增资产" if capex == 0 else (f"{payback} 年" if payback else "超20年")
-    return capex, payback_display, cum / 20.0, cum_share, cum_list, y_pv_rev, y_ess_rev, demand_rev, ev_rev, om_cost, export_price_annual
-
-capex, payback_display, avg_net, cum_share, cum_list, y_pv, y_ess, y_dem, y_ev, om_cost, export_price_annual = build_20y()
-
-# ================= 蒙特卡洛 VaR 与冰冻周压力测试 =================
-np.random.seed(7)
-mc = [(total_rev * np.random.normal(1, 0.15)) - (total_penalty * abs(np.random.normal(1, 0.3))) for _ in range(2000)]
-mc = np.array(mc) / 10000.0 
-p5 = np.percentile(mc, 5)
-var95 = (net_rev_30d / 10000.0) - p5
-
-F_week = pv_cap * 1000.0 * (PV_HOURS / 365.0) * 7.0
-A_week = F_week * (1 - ice_pv_drop)
-surge_price = np.clip(spot_mean * (1 + ice_price_surge), 0.0, 1.5)
-
-if feed_mode == "竞价成功：80%机制电价 + 20%现货":
-    ice_rev = A_week * 0.8 * mech_price + A_week * 0.2 * surge_price
-else:
-    ice_rev = A_week * surge_price
+    hourly_load = (park_load * 1000) / 24.0
+    base_pv_curve = np.maximum(0, np.sin((t % 24 - 6) * np.pi / 12))
+    daily_base_sum = base_pv_curve[:24].sum()
     
-ice_dev = np.maximum(0.0, (F_week - A_week) - deviation_threshold * F_week)
-ice_penalty = ice_dev * surge_price * penalty_multiplier
-ice_net = ice_rev - ice_penalty
+    if pv_cap > 0 and daily_base_sum > 0:
+        norm_factor = (pv_hours / 365.0) / daily_base_sum
+        pv_generation = pv_cap * 1000 * base_pv_curve * norm_factor
+        prediction_error = np.random.normal(0, deviation_sigma, hours)
+        pv_actual = pv_generation * np.maximum(0, (1 + prediction_error))
+        pv_forecast = pv_generation
+        
+        # 偏差考核
+        deviation = np.abs(pv_actual - pv_forecast)
+        threshold_kwh = pv_forecast * deviation_threshold
+        penalized_deviation = np.maximum(0, deviation - threshold_kwh)
+        penalty_cost = penalized_deviation * spot_prices * penalty_multiplier
 
-ice_net_wan = ice_net / 10000.0
-ice_penalty_wan = ice_penalty / 10000.0
-normal_week = avg_net / 52.0
-ice_shrink = ((normal_week - ice_net_wan) / normal_week * 100.0) if normal_week > 0 else 0.0
+        # 光伏发用分离
+        self_consume = np.minimum(pv_actual, hourly_load)
+        exported = pv_actual - self_consume
+        self_consume_rev = self_consume * retail_price 
+
+        if "机制电价" in feed_mode:
+            mech_revenue = exported * 0.8 * mech_price
+            spot_revenue = exported * 0.2 * spot_prices
+        else:
+            mech_revenue = np.zeros(hours)
+            spot_revenue = exported * spot_prices
+    else:
+        pv_forecast = np.zeros(hours)
+        pv_actual = np.zeros(hours)
+        self_consume_rev = np.zeros(hours)
+        mech_revenue = np.zeros(hours)
+        spot_revenue = np.zeros(hours)
+        penalty_cost = np.zeros(hours)
+
+    # 储能零售端结算
+    if ess_cap > 0 and ess_power > 0:
+        monthly_ess_arb = ess_cap * 1000 * ess_cycles * days * ess_spread
+        monthly_ess_demand = ess_power * 1000 * demand_price
+        hourly_ess_total_rev = (monthly_ess_arb + monthly_ess_demand) / hours
+        ess_revenue = np.full(hours, hourly_ess_total_rev)
+        
+        st.session_state['temp_monthly_arb'] = monthly_ess_arb
+        st.session_state['temp_monthly_demand'] = monthly_ess_demand
+    else:
+        ess_revenue = np.zeros(hours)
+        st.session_state['temp_monthly_arb'] = 0.0
+        st.session_state['temp_monthly_demand'] = 0.0
+
+    return pd.DataFrame({
+        'Hour': t, 'Spot_Price': spot_prices,
+        'PV_Forecast': pv_forecast, 'PV_Actual': pv_actual,
+        'Self_Consume_Rev': self_consume_rev,
+        'Mech_Rev': mech_revenue, 'Spot_Rev': spot_revenue,
+        'ESS_Rev': ess_revenue, 'Penalty': penalty_cost
+    })
+
+df = simulate_market_and_risk()
+
+# ================= 财务与风险指标 =================
+total_rev = df['Self_Consume_Rev'].sum() + df['Mech_Rev'].sum() + df['Spot_Rev'].sum() + df['ESS_Rev'].sum()
+total_penalty = df['Penalty'].sum()
+
+# 提取并折算刚性成本
+fixed_opex_annual = (pv_cap * pv_om) + ess_om + land_rent  # 万元
+monthly_share_cost_rmb = (annual_share_cost * 10000.0) / 12.0
+monthly_fixed_opex_rmb = (fixed_opex_annual * 10000.0) / 12.0
+weekly_share_cost_rmb = (annual_share_cost * 10000.0) * (7.0 / 365.0)
+weekly_fixed_opex_rmb = (fixed_opex_annual * 10000.0) * (7.0 / 365.0)
+
+# 单月净收益（严扣分成与运维）
+sim_gross_rev = total_rev - total_penalty
+sim_net_rev = sim_gross_rev - monthly_share_cost_rmb - monthly_fixed_opex_rmb
+
+capex = (pv_cap * 280.0 + ess_cap * 70.0) + dev_fee + cont_fee
+
+# 20年全生命周期动态推演
+pv_rev_1 = (df['Self_Consume_Rev'].sum() + df['Mech_Rev'].sum() + df['Spot_Rev'].sum()) * (365/30) * annual_factor / 10000.0
+ess_rev_1 = df['ESS_Rev'].sum() * (365/30) / 10000.0
+penalty_1 = df['Penalty'].sum() * (365/30) * annual_factor / 10000.0
+
+cumulative_cash = 0.0
+payback_years = 0.0
+total_net_20y = 0.0
+
+for y in range(1, 21):
+    p_factor = (1 - pv_deg / 100.0)**(y - 1)
+    e_factor = (1 - ess_deg / 100.0)**(y - 1)
+    y_rev = (pv_rev_1 * p_factor) + (ess_rev_1 * e_factor) - (penalty_1 * p_factor)
+    # 核心修复：按年剥离分成成本及固定运维
+    y_net = y_rev - annual_share_cost - fixed_opex_annual
+    total_net_20y += y_net
+    
+    if payback_years == 0:
+        cumulative_cash += y_net
+        if cumulative_cash >= capex and y_net > 0:
+            payback_years = (y - 1) + (capex - (cumulative_cash - y_net)) / y_net
+
+avg_net_20y = total_net_20y / 20.0
+total_share_cost_20y = annual_share_cost * 20.0 # 20年累计给园区的钱
+
+if capex == 0:
+    payback_display = "无新增资产"
+elif payback_years > 0:
+    payback_display = f"{payback_years:.1f} 年"
+else:
+    payback_display = ">20年 (难以回本)"
+
+# 蒙特卡洛 P5 风险价值
+np.random.seed(7)
+mc_results = []
+for _ in range(2000):
+    price_f = np.random.normal(1.0, 0.2)
+    dev_f = np.abs(np.random.normal(1.0, 0.4))
+    sim_gross = ((total_rev - df['ESS_Rev'].sum()) * price_f) + df['ESS_Rev'].sum() - (total_penalty * dev_f * penalty_multiplier)
+    # 修复：风险场景下刚性成本照常流失
+    sim_net = sim_gross - monthly_share_cost_rmb - monthly_fixed_opex_rmb
+    mc_results.append(sim_net / 10000.0)
+mc_arr = np.array(mc_results)
+p5_value = np.percentile(mc_arr, 5)
+var95 = (sim_net_rev / 10000.0) - p5_value
+
+# 台风周极端压力测试 
+np.random.seed(99)
+t_s = np.arange(7 * 24)
+base_pv_curve = np.maximum(0, np.sin((t_s % 24 - 6) * np.pi / 12))
+daily_base_sum = base_pv_curve[:24].sum()
+hourly_load = (park_load * 1000) / 24.0
+
+if pv_cap > 0 and daily_base_sum > 0:
+    norm_factor = (pv_hours / 365.0) / daily_base_sum
+    pv_forecast_week = pv_cap * 1000 * base_pv_curve * norm_factor
+    pv_actual_week = pv_forecast_week * (1 - typhoon_pv_drop)
+    crash_price = np.clip(spot_mean * (1 - typhoon_price_drop), 0.0, 1.5)
+
+    stress_self_consume = np.minimum(pv_actual_week, hourly_load)
+    stress_exported = pv_actual_week - stress_self_consume
+    stress_self_consume_rev = stress_self_consume.sum() * retail_price
+
+    if "机制电价" in feed_mode:
+        stress_revenue = stress_self_consume_rev + (stress_exported * 0.8 * mech_price).sum() + (stress_exported * 0.2 * crash_price).sum()
+    else:
+        stress_revenue = stress_self_consume_rev + (stress_exported * crash_price).sum()
+        
+    stress_deviation = np.maximum(0, (pv_forecast_week - pv_actual_week) - deviation_threshold * pv_forecast_week)
+    stress_penalty = (stress_deviation * crash_price * penalty_multiplier).sum()
+else:
+    stress_revenue = 0.0
+    stress_penalty = 0.0
+
+stress_ess_rev = df['ESS_Rev'].sum() / (30.0 / 7.0)
+# 修复：台风停工/降收期间，按周折算的业主分成与租金不可免除
+stress_net = (stress_revenue + stress_ess_rev) - stress_penalty - weekly_share_cost_rmb - weekly_fixed_opex_rmb
+normal_week_net = sim_net_rev / (30.0 / 7.0)
+stress_shrink_pct = ((normal_week_net - stress_net) / normal_week_net * 100.0) if normal_week_net > 0 else 0.0
 
 # ================= 前端可视化 =================
-r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-r1c1.metric("静态总投资", f"{capex:.1f} 万元")
-r1c2.metric("全投资回本期", payback_display)
-r1c3.metric("20年均税前净收益", f"{avg_net:.1f} 万元/年")
-r1c4.metric("20年累计股东净现金流", f"{cum_share:.1f} 万元", "扣除70%贷款本息")
+st.markdown("### 📊 全周期核心指标与利润台账")
+# 新增高亮提示20年刚性支出
+st.error(f"⚠️ **尽调核心提醒**：在全生命周期内，除设备自然衰减与运维开支外，项目将面临向园区支付高达 **{total_share_cost_20y:.1f} 万元** 的刚性收益分成支出。当前所有测算已严格完成该项剥离。")
 
-r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-r2c1.metric("偏差考核年罚款期望", f"{dev_penalty_annual_wan:.2f} 万元", "⚠️ 现货偏差敞口", delta_color="inverse")
-r2c2.metric("30天 VaR95 风险价值", f"{var95:.2f} 万元", f"P5极端收益 {p5:.2f} 万", delta_color="inverse")
-r2c3.metric("冰冻周净收益", f"{ice_net_wan:.2f} 万元", "⚠️ 极端气象考验", delta_color="inverse")
-r2c4.metric("冰冻周收益缩水幅度", f"{ice_shrink:.1f} %", delta_color="inverse")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("20年均税前净利润", f"{avg_net_20y:.1f} 万/年", f"首年净利: {year1_net_rev_10k:.1f} 万")
+col2.metric("动态回本期(含衰减)", payback_display, "基于严苛成本模型定标")
+col3.metric("偏差考核总罚款(单月)", f"{total_penalty/10000:.2f} 万元", "⚠️ 现货敞口风险", delta_color="inverse")
+col4.metric("单月净收益(扣除分成)", f"{sim_net_rev/10000:.2f} 万元", f"极端P5收益 {p5_value:.1f} 万", delta_color="inverse")
 
-st.markdown("### 📉 20年累计净现金流与投资回收轨迹")
-fig_cum = go.Figure(go.Scatter(x=list(range(1, 21)), y=cum_list, mode='lines+markers', name='累计净现金流', line=dict(color='#2563eb', width=2.5)))
-if capex > 0:
-    fig_cum.add_hline(y=capex, line_dash="dash", line_color="red", annotation_text=f"初始总投资 ({capex:.1f} 万元)", annotation_position="bottom right")
-fig_cum.update_layout(height=380, xaxis_title="运营年份", yaxis_title="累计净现金流 (万元)", template="plotly_white", hovermode="x unified")
-st.plotly_chart(fig_cum, use_container_width=True)
+st.markdown("### 📉 收益构成与扣款瀑布图 (全量成本口径)")
+rev_components = {
+    '光伏自发自用抵扣': df['Self_Consume_Rev'].sum(),
+    '光伏机制电价收益': df['Mech_Rev'].sum() if "机制电价" in feed_mode else 0,
+    '光伏现货敞口收益': df['Spot_Rev'].sum(),
+    '储能综合峰谷套利': st.session_state.get('temp_monthly_arb', 0),
+    '储能需量降本收益': st.session_state.get('temp_monthly_demand', 0),
+    '偏差考核罚款(流失)': -df['Penalty'].sum(),
+    '园区收益分成(刚性扣除)': -monthly_share_cost_rmb,
+    '固定运维与租金(刚性扣除)': -monthly_fixed_opex_rmb
+}
+rev_components = {k: v for k, v in rev_components.items() if v != 0}
 
-st.markdown(f"### 📈 湖南现货'鸭形曲线'与光伏余电价格对冲模拟 (综合折算上网价: {export_price_annual:.3f}元)")
-fig_p = go.Figure(go.Scatter(y=spot_prices, mode='lines', name='现货节点日前电价', line=dict(color='#ef4444', width=1.2), opacity=0.7))
-if feed_mode == "竞价成功：80%机制电价 + 20%现货":
-    fig_p.add_hline(y=mech_price, line_dash="dash", line_color="#16a34a", annotation_text=f"机制基准价 ({mech_price}元/kWh)")
-fig_p.add_hline(y=price_valley, line_dash="dot", line_color="#f59e0b", annotation_text=f"午间低谷电价 ({price_valley}元/kWh)")
-fig_p.update_layout(height=380, xaxis_title="模拟小时 (连续30天)", yaxis_title="电价 (元/kWh)", template="plotly_white")
-st.plotly_chart(fig_p, use_container_width=True)
+fig2 = go.Figure(go.Waterfall(
+    name="收益瀑布", orientation="v",
+    x=list(rev_components.keys()), y=list(rev_components.values()),
+    connector={"line": {"color": "rgb(63, 63, 63)"}},
+))
+fig2.update_layout(height=450, yaxis_title="金额 (元)", template="plotly_white")
+st.plotly_chart(fig2, use_container_width=True)
 
-st.markdown("### 🌀 冰冻周极端压力测试 (湖南冬季特色)")
-st.caption("情景模拟：日前按常态申报出力，冰冻周光伏覆冰出力骤降，冬季紧供导致实时机制现货价格飙升。")
-sc1, sc2, sc3 = st.columns(3)
-sc1.metric("常态周均净收益", f"{normal_week:.2f} 万元")
-sc2.metric("冰冻周净收益", f"{ice_net_wan:.2f} 万元", delta_color="inverse")
-sc3.metric("冰冻周偏差罚款", f"{ice_penalty_wan:.2f} 万元", delta_color="inverse")
+st.markdown("### 🌀 台风周极端压力测试 (广东现货气象特征)")
+scol1, scol2, scol3 = st.columns(3)
+scol1.metric("正常周均净收益", f"{normal_week_net/10000:.2f} 万元")
+scol2.metric("台风周净收益", f"{stress_net/10000:.2f} 万元", delta_color="inverse")
+scol3.metric("台风周收益缩水幅度", f"{stress_shrink_pct:.1f} %", delta_color="inverse")
 
-fig_ice = go.Figure(go.Bar(
-    x=['常态周均净收益', '冰冻周净收益', '冰冻周偏差考核罚款'],
-    y=[normal_week, ice_net_wan, ice_penalty_wan],
+fig_s = go.Figure(go.Bar(
+    x=['正常周净收益', '台风周净收益', '其中:台风周偏差罚款'],
+    y=[normal_week_net/10000, stress_net/10000, stress_penalty/10000],
     marker_color=['#16a34a', '#dc2626', '#f59e0b'],
-    text=[f"{normal_week:.2f}万", f"{ice_net_wan:.2f}万", f"{ice_penalty_wan:.2f}万"], textposition='auto'
+    text=[f"{normal_week_net/10000:.2f}万", f"{stress_net/10000:.2f}万", f"{stress_penalty/10000:.2f}万"], textposition='auto'
 ))
-fig_ice.update_layout(height=350, yaxis_title="金额 (万元)", template="plotly_white")
-st.plotly_chart(fig_ice, use_container_width=True)
-
-st.markdown("### ⚖️ 首年收益构成与扣减瀑布图")
-fig_w = go.Figure(go.Waterfall(
-    name="年度收益流", orientation="v", measure=["relative", "relative", "relative", "relative", "relative", "relative", "total"],
-    x=['光伏(含余电入市)', '储能套利', '需量管理', '充电服务', '运维成本', '偏差罚款', '年度净收益'],
-    y=[y_pv, y_ess, y_dem, y_ev, -om_cost, -dev_penalty_annual_wan, (y_pv + y_ess + y_dem + y_ev - om_cost - dev_penalty_annual_wan)],
-    connector={"line": {"color": "rgb(63, 63, 63)"}}
-))
-fig_w.update_layout(title="年度首年收益与成本构成分解 (万元)", template="plotly_white")
-st.plotly_chart(fig_w, use_container_width=True)
+fig_s.update_layout(height=350, yaxis_title="万元", template="plotly_white")
+st.plotly_chart(fig_s, use_container_width=True)
 
 # ================= 专家策略与法律边界分析报告 =================
 st.markdown("---")
-st.header("📜 专家策略与第四监管周期合规报告（2026年8月最新版）")
+st.header("📜 合同风控与法律边界分析报告")
 
-st.subheader("1. 现货敞口对冲与机制电价结算规则落实")
-if feed_mode == "竞价成功：80%机制电价 + 20%现货":
-    st.success(f"**✅ 稳健型结算 (竞价成功)**：当前模型严格适用**增量光伏项目上网电量的80%享受机制电价（{mech_price}元）**。在湖南省 4 月至 6 月现货市场均价低迷（低至 0.075-0.15 元）的大环境下，该方案利用 80% 的机制电价作为“压舱石”，能够大幅对冲汛期负电价或低谷击穿成本线的财务风险。")
+st.subheader("1. 收益分成条款的“倒挂陷阱”防控")
+if share_mode == "模式二：按定额折扣优惠":
+    st.error(f"**核心预警 (定额让利模式)**：在本项目中，您设定了每年向园区定额支付 {share_fixed} 万元。从法务实践来看，这是极高风险的架构。因不可抗力（如长时间极端恶劣天气）或现货均价击穿成本线时，若资产端产生亏损，该笔定额支出将直接导致项目公司现金流断裂。")
+    st.info("**条款修改建议**：在 EMC 或效益分享协议中，必须摒弃“定额保底”，采用“净利润分配优先劣后”原则；或引入**『兜底保障免除条款 / 收益倒挂触发机制』**，约定当现货市场月均出清价格低于特定红线，或遭遇连续极端气象条件时，投资方享有暂停或等比例折减支付定额收益的抗辩权。")
 else:
-    st.warning(f"**⚠️ 激进型敞口 (全额现货)**：当前模型适用**未参与竞价的全现货结算**。参照湖南 2026 年二季度现货结算水平（约 {spot_mean} 元），汛期余电上网收益面临严重缩水。建议通过储能错峰放电、或尽快获取指标参与竞价获取机制电价保障。")
+    st.success(f"**结构评价 (按电量比例分成)**：相比定额支付，按 {share_vol}万度 用电量与 {share_price}元/度 绑定的分成模式具有更好的风险弹性。资产端的收益能力与给业主的让利规模基本保持了同频共振，缓释了资产方的现金流挤兑风险。")
 
-st.subheader("2. 需量管理红线与第四监管周期影响")
-st.info("**⚖️ 发改价格〔2026〕1077号文风险提示**")
+st.subheader("2. 不可抗力与“情势变更”的防御性起草")
 st.markdown("""
-2026年8月1日起执行的**第四监管周期**输配电价结构调整（容量/需量电价权重大幅上升），赋予了本项目中“需量压降”模块更高的经济价值。在合同草拟与执行中应注意：
-1. **需量 40% 刚性红线未变**：申报最大需量不得低于变压器容量的 40%。EMC 合同中需明确约定：因业主方负荷非受控骤降导致未达 40% 而触发底线计费，产生的超额基本电费由业主全额承担。
-2. **电网反向受阻与弃光免责**：针对湖南部分地区电网承载力红黄预警导致的被动限电，EMC 合同必须约定该部分电量视同自发自用结算，防止投资方遭受违约追索。
-3. **极端冰冻天气法定免责**：在并网协议与购售电合同中明确约定湖南冬季雨雪冰冻引发的出力受阻属于《民法典》规定的不可抗力，并设定与气象预警等级联动的偏差免责机制。
+在现货市场环境下，传统合同中泛泛而谈的“不可抗力”条款已不足以形成有效防御。建议在绿电购销协议中加入基于交易规则的**情势变更细化条款**：
+* 明确界定台风（如蓝色及以上预警）、暴雨等导致资产出力骤减的情形，不仅豁免业主的供电考核，且需赋予运营方依据广东电力交易中心规定，**启动免考核申报程序的法定配合权**。
+* 若增量光伏无法获得或丧失“上网电量80%享受机制电价”的政策红利（政策发生根本性转向），属于不可归责于双方的情势变更，应保留重新磋商收益分成比例的救济权利。
 """)
 
-st.markdown("---")
-
-# ================= 满足要求3：一键输出测算报告（markdown格式） =================
-report_md = f'''# 湖南省园区综合能源电价与现货交易风险量化测算报告
-
-## 1. 项目基础参数
-- **变压器容量**：{trans_cap} kVA
-- **当前月均申报需量**：{current_demand} kW
-- **年总用电量**：{park_total_elec} 万kWh/年
-- **光伏装机**：{pv_cap} MW
-- **储能装机**：{ess_cap} MWh
-- **充电桩装机**：{ev_cap} kW
-- **光伏余电入市结算方案**：{feed_mode}
-
-## 2. 投资与收益评估 (20年全生命周期)
-- **静态总投资**：{capex:.1f} 万元
-- **全投资回本期**：{payback_display}
-- **20年均税前净收益**：{avg_net:.1f} 万元/年
-- **20年累计股东净现金流**：{cum_share:.1f} 万元 (扣除70%贷款本息)
-- **偏差考核年罚款期望**：{dev_penalty_annual_wan:.2f} 万元
-
-## 3. 风险与极端情景压力测试
-- **30天 VaR95 风险价值**：{var95:.2f} 万元
-- **P5 极端收益**：{p5:.2f} 万元
-- **常态周均净收益**：{normal_week:.2f} 万元
-- **冰冻周极端净收益**：{ice_net_wan:.2f} 万元 (冰冻周收益缩水幅度：{ice_shrink:.1f}%)
-
-## 4. 专家策略与合规报告
-- **现货敞口对冲与机制电价结算规则落实**：{"(竞价成功) 稳健型结算：当前模型严格适用增量光伏项目上网电量的80%享受机制电价。利用 80% 的机制电价作为压舱石，能够大幅对冲汛期负电价或低谷击穿成本线的财务风险。" if "竞价成功" in feed_mode else "(全额现货) 激进型敞口：当前模型适用未参与竞价的全现货结算。汛期余电上网收益面临严重缩水，建议通过储能错峰放电、或尽快获取指标参与竞价。"}
-- **需量管理红线提示**：需量 40% 刚性红线未变，申报最大需量不得低于变压器容量的 40%。极端冰冻天气法定免责，需在协议中明确约定。
-
-> 本测算模型参照2026年8月施行的最新政策文件。测算结果供论证及风险对冲参考，实际结算以湖南电力交易中心正式出具的结算单为准。
-'''
-
-st.download_button(
-    label="📄 一键输出测算报告（Markdown格式）",
-    data=report_md,
-    file_name="湖南园区综合能源测算报告.md",
-    mime="text/markdown",
-    use_container_width=True
-)
-
-st.caption("⚖️ 免责声明：本模型已完全同步2026年8月施行的发改价格〔2026〕1077号/湘发改价调〔2026〕460号文件，测算结果供投资论证及风险对冲参考。实际结算以湖南电力交易中心正式出具的结算单为准。")
+st.subheader("3. 现货偏差罚金的穿透与隔断")
+st.markdown("""
+实务中，管理方切忌在商务谈判中包揽所有现货偏差责任。
+* 因园区业主自身生产工艺调整、设备突发检修等导致的**非计划性用电负荷剧烈震荡**，进而引发的电能偏差及双细则考核罚金，应在协议中设立追偿机制。这既是风险防火墙，也能倒逼用电方优化其用能计划性。
+""")
