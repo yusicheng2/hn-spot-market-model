@@ -31,7 +31,7 @@ jobs:
           from playwright.async_api import async_playwright
 
           urls = [
-              "https://hn-spot-market-model.streamlit.app/"
+              "https://https://hn-spot-market-model-cfvh9y34jxxfiauzvawspv.streamlit.app/"
           ]
 
           async def visit(url):
