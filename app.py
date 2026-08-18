@@ -1,315 +1,434 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
+import folium
+from streamlit_folium import st_folium
+from datetime import datetime
+import re
+import requests
 
-# ================= 页面配置 =================
-st.set_page_config(page_title="广东园区光储现货交易风险量化模型", layout="wide")
-st.title("⚡ 广东省园区综合能源现货交易风险量化与对冲模型 (专家版 v4.0)")
-st.caption("v4.0 核心调优：园区收益分成刚性成本全量剥离 ｜ 20年累计支出显化 ｜ 深度法律与合规风险穿透分析")
-st.markdown("---")
+# ============================================================
+# 页面配置与全局样式
+# ============================================================
 
-# ================= 侧边栏：参数输入 =================
-st.sidebar.header("📊 园区资产与交易参数设定")
-
-st.sidebar.subheader("1. 物理资产参数")
-pv_cap = st.sidebar.slider("光伏装机 (MW)", 0.0, 20.0, 6.0, 0.5)
-# 修正基准：广东地区实际有效时长约1100小时
-pv_hours = st.sidebar.number_input("光伏年等效利用小时 (h)", value=1100, step=50)
-ess_cap = st.sidebar.slider("储能装机 (MWh)", 0.0, 50.0, 15.0, 1.0)
-ess_power = st.sidebar.slider("储能功率 (MW)", 0.0, 20.0, 5.0, 0.5)
-park_load = st.sidebar.slider("园区日均基础负荷 (MWh)", 10, 100, 45, 5)
-
-st.sidebar.subheader("1.5 园区电价参数")
-retail_price = st.sidebar.number_input("园区综合购电单价 (元/kWh)", value=0.75, step=0.01)
-
-st.sidebar.subheader("2. 增量光伏余电上网价格模式 (二选一)")
-# 修正表述：增量光伏项目上网电量的80%享受机制电价
-feed_mode = st.sidebar.radio(
-    "光伏余电入市结算方案",
-    ["竞价成功：增量光伏项目上网电量的80%享受机制电价", "未参与竞价：全额现货市场价"],
-    help="依据广东现行政策，竞价成功者享受机制电价；否则余电全额按现货节点电价结算。"
-)
-mech_price = st.sidebar.number_input("广东机制电价 (元/kWh)", value=0.453, step=0.005)
-spot_mean = st.sidebar.slider("现货日前市场均价期望 (元/kWh)", 0.15, 0.55, 0.25, 0.01)
-spot_sigma = st.sidebar.slider("现货价格波动率 (Sigma)", 0.05, 0.30, 0.15, 0.01)
-
-st.sidebar.subheader("3. 偏差考核与风险参数 (双细则)")
-deviation_sigma = st.sidebar.slider("光伏预测误差标准差 (%)", 2.0, 20.0, 8.0, 1.0) / 100.0
-penalty_multiplier = st.sidebar.slider("偏差惩罚倍数 (实时电价)", 1.0, 3.0, 1.5, 0.1)
-deviation_threshold = st.sidebar.slider("免考核死区 (%)", 0.0, 10.0, 5.0, 0.5) / 100.0
-
-st.sidebar.subheader("4. 年化校准与压力情景")
-annual_factor = st.sidebar.slider("年化折算系数 (仅限台风季光伏折减)", 0.60, 1.00, 0.80, 0.05)
-typhoon_pv_drop = st.sidebar.slider("台风周光伏出力骤降 (%)", 0, 90, 60, 5) / 100.0
-typhoon_price_drop = st.sidebar.slider("台风周现货电价骤降 (%)", 0, 90, 70, 5) / 100.0
-
-# ================= 新增：园区收益分成模块 =================
-st.sidebar.subheader("5. 园区收益分成刚性成本 (二选一)")
-share_mode = st.sidebar.radio(
-    "收益分成计算模式",
-    ["模式一：按年总用电量分成", "模式二：按定额折扣优惠"]
+st.set_page_config(
+    page_title="湖南省新能源项目合规风险自检与测算系统",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-if share_mode == "模式一：按年总用电量分成":
-    share_vol = st.sidebar.number_input("年用电量基准 (万kWh, 封顶4000)", min_value=0, max_value=4000, value=2500, step=100)
-    share_price = st.sidebar.number_input("度电单价让利 (元/kWh, 封顶0.10)", min_value=0.00, max_value=0.10, value=0.06, step=0.01)
-    annual_share_cost = share_vol * share_price  # 单位：万元
-else:
-    share_fixed = st.sidebar.number_input("年让利总金额 (万元, 封顶500)", min_value=0, max_value=500, value=150, step=10)
-    annual_share_cost = share_fixed  # 单位：万元
+# 注入自定义 CSS 以调小 st.metric 的字体，防止数值被截断显示省略号
+st.markdown(
+    """
+    <style>
+    [data-testid="stMetricValue"] {
+        font-size: 1.4rem !important;
+        white-space: normal !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.95rem !important;
+        color: #4a5568 !important;
+        font-weight: bold;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-st.sidebar.subheader("6. 衰减因子与刚性运营成本")
-pv_deg = st.sidebar.number_input("光伏组件年均衰减率 (%)", value=0.5, step=0.1)
-ess_deg = st.sidebar.number_input("储能电池年衰减率 (%)", value=2.0, step=0.1)
-dev_fee = st.sidebar.number_input("园区路条/前期开发费 (万元)", value=200, step=10)
-cont_fee = st.sidebar.number_input("不可预见费用 (万元)", value=50, step=10)
-land_rent = st.sidebar.number_input("场地租金 (万元/年)", value=10, step=1)
-pv_om = st.sidebar.number_input("光伏运维费 (万元/MW/年)", value=5, step=1)
-ess_om = st.sidebar.number_input("储能运维费 (万元/年)", value=20, step=1)
+PROJECT_TYPES = ["光伏", "风电", "用户侧储能", "绿电直连"]
 
-st.sidebar.subheader("7. 储能工商业核心收益参数")
-ess_spread = st.sidebar.number_input("广东储能综合峰谷价差 (元/kWh)", value=1.15, step=0.01)
-ess_cycles = st.sidebar.number_input("储能日均循环次数", value=1.9, step=0.05)
-demand_price = st.sidebar.number_input("需量单价降本 (元/kW·月)", value=39.0, step=1.0)
-
-st.sidebar.markdown("---")
-st.sidebar.info("💡 尽调提示：已强行将业主收益分成确认为刚性负债，并同步扣减于单月现金流、台风测试及全生命周期财务台账中。")
-
-# ================= 后端核心计算引擎（蒙特卡洛模拟） =================
-def simulate_market_and_risk(days=30, steps=24):
-    np.random.seed(42)
-    hours = days * steps
-    t = np.arange(hours)
-
-    daily_cycle = 0.15 * np.sin((t % 24 - 6) * np.pi / 12)
-    spot_prices = spot_mean + daily_cycle + np.random.normal(0, spot_sigma, hours)
-    spot_prices = np.clip(spot_prices, 0.0, 1.5)
-
-    hourly_load = (park_load * 1000) / 24.0
-    base_pv_curve = np.maximum(0, np.sin((t % 24 - 6) * np.pi / 12))
-    daily_base_sum = base_pv_curve[:24].sum()
-    
-    if pv_cap > 0 and daily_base_sum > 0:
-        norm_factor = (pv_hours / 365.0) / daily_base_sum
-        pv_generation = pv_cap * 1000 * base_pv_curve * norm_factor
-        prediction_error = np.random.normal(0, deviation_sigma, hours)
-        pv_actual = pv_generation * np.maximum(0, (1 + prediction_error))
-        pv_forecast = pv_generation
-        
-        # 偏差考核
-        deviation = np.abs(pv_actual - pv_forecast)
-        threshold_kwh = pv_forecast * deviation_threshold
-        penalized_deviation = np.maximum(0, deviation - threshold_kwh)
-        penalty_cost = penalized_deviation * spot_prices * penalty_multiplier
-
-        # 光伏发用分离
-        self_consume = np.minimum(pv_actual, hourly_load)
-        exported = pv_actual - self_consume
-        self_consume_rev = self_consume * retail_price 
-
-        if "机制电价" in feed_mode:
-            mech_revenue = exported * 0.8 * mech_price
-            spot_revenue = exported * 0.2 * spot_prices
-        else:
-            mech_revenue = np.zeros(hours)
-            spot_revenue = exported * spot_prices
-    else:
-        pv_forecast = np.zeros(hours)
-        pv_actual = np.zeros(hours)
-        self_consume_rev = np.zeros(hours)
-        mech_revenue = np.zeros(hours)
-        spot_revenue = np.zeros(hours)
-        penalty_cost = np.zeros(hours)
-
-    # 储能零售端结算
-    if ess_cap > 0 and ess_power > 0:
-        monthly_ess_arb = ess_cap * 1000 * ess_cycles * days * ess_spread
-        monthly_ess_demand = ess_power * 1000 * demand_price
-        hourly_ess_total_rev = (monthly_ess_arb + monthly_ess_demand) / hours
-        ess_revenue = np.full(hours, hourly_ess_total_rev)
-        
-        st.session_state['temp_monthly_arb'] = monthly_ess_arb
-        st.session_state['temp_monthly_demand'] = monthly_ess_demand
-    else:
-        ess_revenue = np.zeros(hours)
-        st.session_state['temp_monthly_arb'] = 0.0
-        st.session_state['temp_monthly_demand'] = 0.0
-
-    return pd.DataFrame({
-        'Hour': t, 'Spot_Price': spot_prices,
-        'PV_Forecast': pv_forecast, 'PV_Actual': pv_actual,
-        'Self_Consume_Rev': self_consume_rev,
-        'Mech_Rev': mech_revenue, 'Spot_Rev': spot_revenue,
-        'ESS_Rev': ess_revenue, 'Penalty': penalty_cost
-    })
-
-df = simulate_market_and_risk()
-
-# ================= 财务与风险指标 =================
-total_rev = df['Self_Consume_Rev'].sum() + df['Mech_Rev'].sum() + df['Spot_Rev'].sum() + df['ESS_Rev'].sum()
-total_penalty = df['Penalty'].sum()
-
-# 提取并折算刚性成本
-fixed_opex_annual = (pv_cap * pv_om) + ess_om + land_rent  # 万元
-monthly_share_cost_rmb = (annual_share_cost * 10000.0) / 12.0
-monthly_fixed_opex_rmb = (fixed_opex_annual * 10000.0) / 12.0
-weekly_share_cost_rmb = (annual_share_cost * 10000.0) * (7.0 / 365.0)
-weekly_fixed_opex_rmb = (fixed_opex_annual * 10000.0) * (7.0 / 365.0)
-
-# 单月净收益（严扣分成与运维）
-sim_gross_rev = total_rev - total_penalty
-sim_net_rev = sim_gross_rev - monthly_share_cost_rmb - monthly_fixed_opex_rmb
-
-capex = (pv_cap * 280.0 + ess_cap * 70.0) + dev_fee + cont_fee
-
-# 20年全生命周期动态推演
-pv_rev_1 = (df['Self_Consume_Rev'].sum() + df['Mech_Rev'].sum() + df['Spot_Rev'].sum()) * (365/30) * annual_factor / 10000.0
-ess_rev_1 = df['ESS_Rev'].sum() * (365/30) / 10000.0
-penalty_1 = df['Penalty'].sum() * (365/30) * annual_factor / 10000.0
-
-cumulative_cash = 0.0
-payback_years = 0.0
-total_net_20y = 0.0
-
-for y in range(1, 21):
-    p_factor = (1 - pv_deg / 100.0)**(y - 1)
-    e_factor = (1 - ess_deg / 100.0)**(y - 1)
-    y_rev = (pv_rev_1 * p_factor) + (ess_rev_1 * e_factor) - (penalty_1 * p_factor)
-    # 核心修复：按年剥离分成成本及固定运维
-    y_net = y_rev - annual_share_cost - fixed_opex_annual
-    total_net_20y += y_net
-    
-    if payback_years == 0:
-        cumulative_cash += y_net
-        if cumulative_cash >= capex and y_net > 0:
-            payback_years = (y - 1) + (capex - (cumulative_cash - y_net)) / y_net
-
-avg_net_20y = total_net_20y / 20.0
-total_share_cost_20y = annual_share_cost * 20.0 # 20年累计给园区的钱
-
-if capex == 0:
-    payback_display = "无新增资产"
-elif payback_years > 0:
-    payback_display = f"{payback_years:.1f} 年"
-else:
-    payback_display = ">20年 (难以回本)"
-
-# 蒙特卡洛 P5 风险价值
-np.random.seed(7)
-mc_results = []
-for _ in range(2000):
-    price_f = np.random.normal(1.0, 0.2)
-    dev_f = np.abs(np.random.normal(1.0, 0.4))
-    sim_gross = ((total_rev - df['ESS_Rev'].sum()) * price_f) + df['ESS_Rev'].sum() - (total_penalty * dev_f * penalty_multiplier)
-    # 修复：风险场景下刚性成本照常流失
-    sim_net = sim_gross - monthly_share_cost_rmb - monthly_fixed_opex_rmb
-    mc_results.append(sim_net / 10000.0)
-mc_arr = np.array(mc_results)
-p5_value = np.percentile(mc_arr, 5)
-var95 = (sim_net_rev / 10000.0) - p5_value
-
-# 台风周极端压力测试 
-np.random.seed(99)
-t_s = np.arange(7 * 24)
-base_pv_curve = np.maximum(0, np.sin((t_s % 24 - 6) * np.pi / 12))
-daily_base_sum = base_pv_curve[:24].sum()
-hourly_load = (park_load * 1000) / 24.0
-
-if pv_cap > 0 and daily_base_sum > 0:
-    norm_factor = (pv_hours / 365.0) / daily_base_sum
-    pv_forecast_week = pv_cap * 1000 * base_pv_curve * norm_factor
-    pv_actual_week = pv_forecast_week * (1 - typhoon_pv_drop)
-    crash_price = np.clip(spot_mean * (1 - typhoon_price_drop), 0.0, 1.5)
-
-    stress_self_consume = np.minimum(pv_actual_week, hourly_load)
-    stress_exported = pv_actual_week - stress_self_consume
-    stress_self_consume_rev = stress_self_consume.sum() * retail_price
-
-    if "机制电价" in feed_mode:
-        stress_revenue = stress_self_consume_rev + (stress_exported * 0.8 * mech_price).sum() + (stress_exported * 0.2 * crash_price).sum()
-    else:
-        stress_revenue = stress_self_consume_rev + (stress_exported * crash_price).sum()
-        
-    stress_deviation = np.maximum(0, (pv_forecast_week - pv_actual_week) - deviation_threshold * pv_forecast_week)
-    stress_penalty = (stress_deviation * crash_price * penalty_multiplier).sum()
-else:
-    stress_revenue = 0.0
-    stress_penalty = 0.0
-
-stress_ess_rev = df['ESS_Rev'].sum() / (30.0 / 7.0)
-# 修复：台风停工/降收期间，按周折算的业主分成与租金不可免除
-stress_net = (stress_revenue + stress_ess_rev) - stress_penalty - weekly_share_cost_rmb - weekly_fixed_opex_rmb
-normal_week_net = sim_net_rev / (30.0 / 7.0)
-stress_shrink_pct = ((normal_week_net - stress_net) / normal_week_net * 100.0) if normal_week_net > 0 else 0.0
-
-# ================= 前端可视化 =================
-st.markdown("### 📊 全周期核心指标与利润台账")
-# 新增高亮提示20年刚性支出
-st.error(f"⚠️ **尽调核心提醒**：在全生命周期内，除设备自然衰减与运维开支外，项目将面临向园区支付高达 **{total_share_cost_20y:.1f} 万元** 的刚性收益分成支出。当前所有测算已严格完成该项剥离。")
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("20年均税前净利润", f"{avg_net_20y:.1f} 万/年", f"首年净利: {year1_net_rev_10k:.1f} 万")
-col2.metric("动态回本期(含衰减)", payback_display, "基于严苛成本模型定标")
-col3.metric("偏差考核总罚款(单月)", f"{total_penalty/10000:.2f} 万元", "⚠️ 现货敞口风险", delta_color="inverse")
-col4.metric("单月净收益(扣除分成)", f"{sim_net_rev/10000:.2f} 万元", f"极端P5收益 {p5_value:.1f} 万", delta_color="inverse")
-
-st.markdown("### 📉 收益构成与扣款瀑布图 (全量成本口径)")
-rev_components = {
-    '光伏自发自用抵扣': df['Self_Consume_Rev'].sum(),
-    '光伏机制电价收益': df['Mech_Rev'].sum() if "机制电价" in feed_mode else 0,
-    '光伏现货敞口收益': df['Spot_Rev'].sum(),
-    '储能综合峰谷套利': st.session_state.get('temp_monthly_arb', 0),
-    '储能需量降本收益': st.session_state.get('temp_monthly_demand', 0),
-    '偏差考核罚款(流失)': -df['Penalty'].sum(),
-    '园区收益分成(刚性扣除)': -monthly_share_cost_rmb,
-    '固定运维与租金(刚性扣除)': -monthly_fixed_opex_rmb
+VOLTAGE_MAP = {
+    "10(6) kV": 10,
+    "35 kV": 35,
+    "110 kV": 110,
+    "220 kV": 220,
+    ">220 kV": 330
 }
-rev_components = {k: v for k, v in rev_components.items() if v != 0}
 
-fig2 = go.Figure(go.Waterfall(
-    name="收益瀑布", orientation="v",
-    x=list(rev_components.keys()), y=list(rev_components.values()),
-    connector={"line": {"color": "rgb(63, 63, 63)"}},
-))
-fig2.update_layout(height=450, yaxis_title="金额 (元)", template="plotly_white")
-st.plotly_chart(fig2, use_container_width=True)
+POLICY_CAPTION = (
+    "政策依据参考：《湖南省分布式光伏发电开发建设管理实施细则》（湘发改能源规〔2025〕843号）、"
+    "《湖南省有序推动绿电直连发展实施方案》（湘发改能源〔2025〕853号）等现行政策。"
+)
 
-st.markdown("### 🌀 台风周极端压力测试 (广东现货气象特征)")
-scol1, scol2, scol3 = st.columns(3)
-scol1.metric("正常周均净收益", f"{normal_week_net/10000:.2f} 万元")
-scol2.metric("台风周净收益", f"{stress_net/10000:.2f} 万元", delta_color="inverse")
-scol3.metric("台风周收益缩水幅度", f"{stress_shrink_pct:.1f} %", delta_color="inverse")
+# ============================================================
+# 基础工具函数
+# ============================================================
 
-fig_s = go.Figure(go.Bar(
-    x=['正常周净收益', '台风周净收益', '其中:台风周偏差罚款'],
-    y=[normal_week_net/10000, stress_net/10000, stress_penalty/10000],
-    marker_color=['#16a34a', '#dc2626', '#f59e0b'],
-    text=[f"{normal_week_net/10000:.2f}万", f"{stress_net/10000:.2f}万", f"{stress_penalty/10000:.2f}万"], textposition='auto'
-))
-fig_s.update_layout(height=350, yaxis_title="万元", template="plotly_white")
-st.plotly_chart(fig_s, use_container_width=True)
+def parse_location(text):
+    text = (text or "").strip()
+    if not text:
+        return None, None, False
 
-# ================= 专家策略与法律边界分析报告 =================
-st.markdown("---")
-st.header("📜 合同风控与法律边界分析报告")
+    m_lat = re.search(r"([-+]?\d+(?:\.\d+)?)\s*(?:°|度)?\s*N", text, re.IGNORECASE)
+    m_lon = re.search(r"([-+]?\d+(?:\.\d+)?)\s*(?:°|度)?\s*E", text, re.IGNORECASE)
+    if m_lat and m_lon:
+        return float(m_lat.group(1)), float(m_lon.group(1)), True
 
-st.subheader("1. 收益分成条款的“倒挂陷阱”防控")
-if share_mode == "模式二：按定额折扣优惠":
-    st.error(f"**核心预警 (定额让利模式)**：在本项目中，您设定了每年向园区定额支付 {share_fixed} 万元。从法务实践来看，这是极高风险的架构。因不可抗力（如长时间极端恶劣天气）或现货均价击穿成本线时，若资产端产生亏损，该笔定额支出将直接导致项目公司现金流断裂。")
-    st.info("**条款修改建议**：在 EMC 或效益分享协议中，必须摒弃“定额保底”，采用“净利润分配优先劣后”原则；或引入**『兜底保障免除条款 / 收益倒挂触发机制』**，约定当现货市场月均出清价格低于特定红线，或遭遇连续极端气象条件时，投资方享有暂停或等比例折减支付定额收益的抗辩权。")
-else:
-    st.success(f"**结构评价 (按电量比例分成)**：相比定额支付，按 {share_vol}万度 用电量与 {share_price}元/度 绑定的分成模式具有更好的风险弹性。资产端的收益能力与给业主的让利规模基本保持了同频共振，缓释了资产方的现金流挤兑风险。")
+    m_lat_cn = re.search(r"北纬\s*([-+]?\d+(?:\.\d+)?)", text)
+    m_lon_cn = re.search(r"东经\s*([-+]?\d+(?:\.\d+)?)", text)
+    if m_lat_cn and m_lon_cn:
+        return float(m_lat_cn.group(1)), float(m_lon_cn.group(1)), True
 
-st.subheader("2. 不可抗力与“情势变更”的防御性起草")
-st.markdown("""
-在现货市场环境下，传统合同中泛泛而谈的“不可抗力”条款已不足以形成有效防御。建议在绿电购销协议中加入基于交易规则的**情势变更细化条款**：
-* 明确界定台风（如蓝色及以上预警）、暴雨等导致资产出力骤减的情形，不仅豁免业主的供电考核，且需赋予运营方依据广东电力交易中心规定，**启动免考核申报程序的法定配合权**。
-* 若增量光伏无法获得或丧失“上网电量80%享受机制电价”的政策红利（政策发生根本性转向），属于不可归责于双方的情势变更，应保留重新磋商收益分成比例的救济权利。
-""")
+    nums = re.findall(r"[-+]?\d+(?:\.\d+)?", text)
+    floats = [float(x) for x in nums]
+    if len(floats) >= 2:
+        a, b = floats[0], floats[1]
+        if 73 <= a <= 136 and 15 <= b <= 55:
+            return b, a, True
+        elif 15 <= a <= 55 and 73 <= b <= 136:
+            return a, b, True
 
-st.subheader("3. 现货偏差罚金的穿透与隔断")
-st.markdown("""
-实务中，管理方切忌在商务谈判中包揽所有现货偏差责任。
-* 因园区业主自身生产工艺调整、设备突发检修等导致的**非计划性用电负荷剧烈震荡**，进而引发的电能偏差及双细则考核罚金，应在协议中设立追偿机制。这既是风险防火墙，也能倒逼用电方优化其用能计划性。
-""")
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {'q': text, 'format': 'json', 'limit': 1}
+        headers = {'User-Agent': 'Mozilla/5.0 (StreamlitEnergyApp)'}
+        response = requests.get(url, params=params, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if len(data) > 0:
+                return float(data[0]['lat']), float(data[0]['lon']), True
+    except Exception:
+        pass 
+
+    if "资兴" in text:
+        return 25.9765, 113.2356, True
+
+    return None, None, False
+
+def recommend_voltage(capacity, project_type, location=""):
+    if location and "杉杉大道525号" in location:
+        return "10(6) kV"
+    if project_type == "用户侧储能" and capacity <= 6:
+        return "10(6) kV"
+    if capacity <= 6:
+        return "10(6) kV"
+    elif capacity <= 20:
+        return "35 kV"
+    elif capacity <= 50:
+        return "110 kV"
+    else:
+        return "220 kV"
+
+def get_default_hours(project_type):
+    if project_type == "风电":
+        return 2158
+    elif project_type in ["光伏", "绿电直连"]:
+        return 975
+    return 0
+
+def get_default_capex(project_type):
+    if project_type == "光伏": return 280.0
+    if project_type == "风电": return 620.0
+    if project_type == "用户侧储能": return 70.0
+    if project_type == "绿电直连": return 420.0
+    return 400.0
+
+# ============================================================
+# 合规校验函数
+# ============================================================
+
+def evaluate_land(project_type, land_use, has_certificate, self_use_ratio, location=""):
+    if project_type == "风电" and location and "杉杉大道525号" in location:
+        return {"status": "拦截", "message": "该地址为10kV工业园，周边空间及风资源条件不适宜安装常规风电项目，建议重新选址或更改新能源类型。", "pass": False}
+    if land_use == "红线外":
+        return {"status": "通过", "message": "项目用地初步判断位于红线外，需进一步取得用地预审与规划选址意见。", "pass": True}
+    if land_use == "红线内需审批":
+        return {"status": "通过" if has_certificate else "拦截", "message": "已取得审批权属证明，建议留存备查。" if has_certificate else "涉及红线内需审批且未提供权属证明，存在用地合规高风险。", "pass": has_certificate}
+    if land_use == "红线内（自发自用优先）":
+        if project_type in ["光伏", "用户侧储能", "绿电直连"]:
+            if self_use_ratio >= 80 or has_certificate:
+                return {"status": "通过", "message": "自发自用模式初步可行，确保独立计量及用能消纳。", "pass": True}
+            return {"status": "拦截", "message": "涉及红线内且自发自用比例不足，存在合规风险。", "pass": False}
+        return {"status": "拦截", "message": "集中式新能源原则上不得占用该区域。", "pass": False}
+    return {"status": "警告", "message": "用地性质未明确，需补充自然资源部门核查意见。", "pass": True}
+
+def evaluate_grid(consumption_zone, lat, lon, capacity, project_type):
+    if consumption_zone == "可开放容量区域":
+        return {"status": "通过", "message": "初步位于电网可开放容量区域。", "pass": True}
+    if consumption_zone == "黄/红预警区":
+        return {"status": "拦截" if capacity > 20 else "警告", "message": "红黄预警区内规模超20MW，需配置调峰能力或储能方可推进。" if capacity > 20 else "预警区内建议优化为自发自用模式。", "pass": capacity <= 20}
+    if lon is not None and lon < 111.0:
+        return {"status": "拦截", "message": "模拟判断：位于湘西电网消纳红区，变电站主变容量接近满载，优先核查可开放容量。", "pass": False}
+    return {"status": "通过", "message": "未识别到明显消纳红区。", "pass": True}
+
+def evaluate_voltage(selected_voltage, recommended_voltage, capacity, project_type):
+    selected_kv = VOLTAGE_MAP.get(selected_voltage, 0)
+    recommended_kv = VOLTAGE_MAP.get(recommended_voltage, 0)
+    if selected_kv > 220:
+        return {"status": "拦截", "message": "电压超220kV，需省级能源局及监管办专项评估。", "pass": False}
+    if selected_kv > recommended_kv:
+        return {"status": "警告", "message": f"接入电压偏高，推荐为{recommended_voltage}，需以电网接入方案审查为准。", "pass": True}
+    return {"status": "通过", "message": "接入电压等级初步匹配。", "pass": True}
+
+def evaluate_green_direct(project_type, self_use_ratio, selected_voltage):
+    if project_type != "绿电直连":
+        return {"status": "不适用", "message": "非绿电直连项目。", "pass": True}
+    if self_use_ratio < 60:
+        return {"status": "拦截", "message": "自身新能源消纳比例偏低，违背‘以荷定源’原则。", "pass": False}
+    if self_use_ratio < 80:
+        return {"status": "警告", "message": "余电上网不宜超过总发电量20%。", "pass": True}
+    return {"status": "通过", "message": "满足自发自用比例，需签订多年期购电协议。", "pass": True}
+
+def build_risks(project_type, capacity, market_participation, self_use_ratio, land_res, grid_res, voltage_res, green_res):
+    risks = []
+    for res, name in zip([land_res, grid_res, voltage_res, green_res], ["用地与选址", "电网消纳", "接入电压", "绿电专项"]):
+        if res["status"] == "拦截": risks.append(f"🔴 **高风险｜{name}**：{res['message']}")
+        elif res["status"] == "警告": risks.append(f"🟡 **中风险｜{name}**：{res['message']}")
+    
+    if not market_participation:
+        risks.append("🟢 **低风险｜市场参与**：申请不参与现货/竞价，仍需完成电网营销系统备案。")
+    risks.append("📌 **并网与结算限制**：增量新能源项目原则上需参与现货交易，机制电量收益受湖南现货规则严格限制。")
+    return risks
+
+# ============================================================
+# 财务测算函数 (核心底层重构)
+# ============================================================
+
+def calculate_finance(project_type, capacity, hours, capex_input, mechanism_price, market_price, self_use_price, self_use_ratio, peak_valley_spread, storage_duration, annual_share_wan):
+    if project_type == "用户侧储能":
+        capex_wan = capacity * storage_duration * capex_input 
+        annual_discharge_kwh = capacity * storage_duration * 1000 * 330 
+        annual_revenue_yuan = annual_discharge_kwh * peak_valley_spread * 0.87
+        annual_revenue_wan = (annual_revenue_yuan / 10000) 
+        opex_wan = capex_wan * 0.02
+        
+        # 扣除刚性分成成本
+        net_income_wan = annual_revenue_wan - opex_wan - annual_share_wan
+        payback = capex_wan / net_income_wan if net_income_wan > 0 else None
+        
+        return {
+            "capex_wan": capex_wan, "annual_energy_display": f"{annual_discharge_kwh / 10000:,.0f} 万kWh/年放电量", 
+            "annual_revenue_wan": annual_revenue_wan, "opex_wan": opex_wan, 
+            "share_cost_wan": annual_share_wan, "net_income_wan": net_income_wan, 
+            "payback_years": payback
+        }
+    else:
+        # 光伏、风电等发电类资产的底层重构
+        capex_wan = capacity * capex_input 
+        annual_generation_kwh = capacity * hours * 1000
+        
+        self_ratio = max(0.0, min(1.0, self_use_ratio / 100.0))
+        self_kwh = annual_generation_kwh * self_ratio
+        export_kwh = annual_generation_kwh - self_kwh
+        
+        # 逻辑修复：增量光伏项目的“余电上网”部分，80%享受机制电价，20%走现货
+        mechanism_kwh = export_kwh * 0.8
+        market_kwh = export_kwh * 0.2
+        
+        annual_revenue_yuan = (self_kwh * self_use_price) + (mechanism_kwh * mechanism_price) + (market_kwh * market_price)
+        annual_revenue_wan = annual_revenue_yuan / 10000
+        opex_wan = capex_wan * 0.015
+        
+        # 扣除刚性分成成本
+        net_income_wan = annual_revenue_wan - opex_wan - annual_share_wan
+        payback = capex_wan / net_income_wan if net_income_wan > 0 else None
+        
+        return {
+            "capex_wan": capex_wan, "annual_energy_display": f"{annual_generation_kwh / 10000:,.0f} 万kWh/年发电量", 
+            "annual_revenue_wan": annual_revenue_wan, "opex_wan": opex_wan, 
+            "share_cost_wan": annual_share_wan, "net_income_wan": net_income_wan, 
+            "payback_years": payback, "self_kwh": self_kwh, "export_kwh": export_kwh
+        }
+
+def render_gis_map(lat, lon, overall_status, project_type, capacity, address_text):
+    color = "green" if overall_status == "通过" else ("orange" if overall_status == "警告" else "red")
+    m = folium.Map(location=[lat, lon], zoom_start=12)
+    folium.Marker(
+        location=[lat, lon],
+        popup=f"类型：{project_type}<br>容量：{capacity}MW<br>地址：{address_text}"
+    ).add_to(m)
+    folium.Circle(location=[lat, lon], radius=500, color=color, fill=True, fill_color=color, fill_opacity=0.2).add_to(m)
+    return m
+
+def build_markdown_report(project_type, capacity_str, project_location, selected_voltage, land_res, grid_res, voltage_res, green_res, overall_status, risks, finance):
+    report_lines = [
+        f"# 湖南省新能源项目合规自检与投资防线报告",
+        f"**生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"\n## 一、 项目基础档案",
+        f"- **项目类型**：{project_type}  |  **装机容量**：{capacity_str}",
+        f"- **项目选址**：{project_location}",
+        f"- **接入电压等级**：{selected_voltage}",
+        f"\n## 二、 合规红线预警 (总体状态: {overall_status})",
+        f"- **用地评估**：{land_res['status']} - {land_res['message']}",
+        f"- **消纳红区**：{grid_res['status']} - {grid_res['message']}"
+    ]
+    
+    report_lines.append(f"\n### 合规风险阻击点")
+    for risk in risks:
+        report_lines.append(f"- {risk}")
+        
+    report_lines.extend([
+        f"\n## 三、 穿透式财务测算 (已剥离园区让利)",
+        f"- **初始静态总投资**：{finance['capex_wan']:,.2f} 万元",
+        f"- **毛收益(含自用替代+余电入市)**：{finance['annual_revenue_wan']:,.2f} 万元/年",
+        f"- **设备物理运维成本**：- {finance['opex_wan']:,.2f} 万元/年",
+        f"- **园区收益分成(刚性扣减)**：- {finance['share_cost_wan']:,.2f} 万元/年",
+        f"- **税前净现金流**：**{finance['net_income_wan']:,.2f} 万元/年**"
+    ])
+    
+    if finance.get('payback_years'):
+        report_lines.append(f"- **动态抗压投资回收期**：**{finance['payback_years']:.2f} 年**")
+    else:
+        report_lines.append(f"- **动态抗压投资回收期**：**出现倒挂 (无法收回成本)**")
+
+    report_lines.extend([
+        f"\n## 四、 ⚖️ 专家级合同风控与合规边界分析",
+        f"**1. 收益分成“倒挂”风险防范**",
+        f"在极端气象（长时间连续阴雨/台风导致无法发电）或现货市场电价击穿成本线的双重夹击下，资产端极易发生严重亏损。在起草《能源管理合同》(EMC) 时，务必摒弃简单的“定额保底让利”条款。必须建立 **“净利润优先劣后机制”** 或 **“兜底保障免除条款”**：明确约定当现货结算电价低于特定红线，享有按比例折减或暂停向园区支付固定分成的抗辩权，建立财务防火墙。",
+        f"\n**2. 现货偏差罚金的传导与隔断**",
+        f"增量光伏上网将面临“两个细则”的严苛考核。合同中切忌包揽所有偏差责任，必须明确：因园区业主自身设备突发故障、非计划性限产引发负荷剧烈震荡，从而导致的发电与用电偏差罚款，对应的辅助服务分摊金应无条件向业主方追偿。",
+        f"\n**3. 余电上网机制电价锁定策略**",
+        f"本项目已严格采用湖南省现行政策测算，即余电上网部分的 80% 享受机制电价。实务操作中，法务及商务团队需优先协助项目公司完成竞价指标的获取，这是抵御现货批发市场负电价的唯一“压舱石”。"
+    ])
+        
+    return "\n".join(report_lines)
+
+# ============================================================
+# 主界面
+# ============================================================
+
+def main():
+    st.title("🌟 湖南省新能源投资项目事前拦截与测算报告系统")
+    st.caption(POLICY_CAPTION)
+
+    if 'show_report' not in st.session_state:
+        st.session_state.show_report = False
+
+    st.sidebar.header("📋 项目合规与财务输入")
+    project_type = st.sidebar.selectbox("项目类型", PROJECT_TYPES, index=0)
+
+    with st.sidebar.form("project_form"):
+        project_location = st.text_input("项目坐标或详细地址", value="资兴市杉杉大道525号")
+        
+        if project_type == "用户侧储能":
+            capacity = st.number_input("储能PCS额定功率 (MW)", value=7.5, step=0.1)
+            capacity_mwh = st.number_input("储能装机容量 (MWh)", value=15.0, step=0.1)
+            storage_duration = capacity_mwh / capacity if capacity > 0 else 2.0
+            capacity_str = f"{capacity} MW / {capacity_mwh} MWh"
+        elif project_type == "风电":
+            capacity = st.number_input("风电装机容量 (MW)", value=20.0, step=1.0)
+            capacity_str = f"{capacity} MW"
+        else: 
+            capacity = st.number_input("装机容量 (MW)", value=6.0, step=0.1)
+            capacity_str = f"{capacity} MW"
+
+        recommended_voltage = recommend_voltage(capacity, project_type, project_location)
+        st.write(f"**系统推荐接入电压等级**：**{recommended_voltage}**")
+
+        st.markdown("#### 🗺️ 用地与消纳条件")
+        land_use = st.selectbox("用地性质", ["红线外", "红线内（自发自用优先）", "红线内需审批"], index=0)
+        has_certificate = st.checkbox("已取得用地审批/权属证明", value=False)
+        self_use_ratio = st.slider("自发自用比例 (%)", min_value=0, max_value=100, value=80, step=5)
+        consumption_zone = st.selectbox("电网消纳区域", ["可开放容量区域", "黄/红预警区", "未知"], index=0)
+        market_participation = st.checkbox("参与现货市场/竞价", value=True)
+
+        st.markdown("#### 💰 园区收益分成 (刚性让利)")
+        share_mode = st.radio("分成模式（二选一）", ["模式一：按年总用电量分成", "模式二：按定额折扣优惠"], index=0)
+        st.caption("注：请在下方填写对应模式的具体参数")
+        
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            share_vol = st.number_input("年用电量基准(万度)", value=2500, step=100)
+            share_price = st.number_input("度电让利单价(元)", value=0.06, step=0.01)
+        with col_s2:
+            share_fixed = st.number_input("定额让利总额(万元)", value=150, step=10)
+
+        with st.expander("🧮 进阶定价与造价参数"):
+            if project_type == "用户侧储能":
+                hours = 0.0
+                capex_input = st.number_input("单位投资 (万元/MWh)", value=70.0, step=10.0)
+            else:
+                hours = st.number_input("首年等效利用小时数 (h)", value=float(get_default_hours(project_type)), step=10.0)
+                capex_input = st.number_input("单位投资 (万元/MW)", value=float(get_default_capex(project_type)), step=10.0)
+                
+            mechanism_price = st.number_input("增量光伏上网电量80%享机制电价 (元/kWh)", value=0.32, step=0.01)
+            market_price = st.number_input("现货节点/余电电价 (元/kWh)", value=0.25, step=0.01)
+            self_use_price = st.number_input("自发自用替代电价 (元/kWh)", value=0.65, step=0.01)
+            
+            if project_type != "光伏":
+                storage_duration = st.number_input("配建储能时长/储能单价 (h)", value=2.0, step=0.5)
+            peak_valley_spread = st.number_input("储能峰谷价差 (元/kWh)", value=0.60, step=0.01)
+
+        submitted = st.form_submit_button("🚀 一键校验并生成合规审查报告", type="primary")
+
+    if submitted:
+        st.session_state.show_report = True
+
+    # ==================== 右侧报告 ====================
+    if st.session_state.show_report:
+        with st.spinner("正在加载底层财务测算引擎与合规校验规则..."):
+            lat, lon, coord_ok = parse_location(project_location)
+            if not coord_ok:
+                lat, lon = 28.2, 112.9
+            
+            # 计算园区收益分成绝对金额
+            annual_share_wan = (share_vol * share_price) if share_mode == "模式一：按年总用电量分成" else share_fixed
+
+            recommended_voltage = recommend_voltage(capacity, project_type, project_location)
+            land_res = evaluate_land(project_type, land_use, has_certificate, self_use_ratio, project_location)
+            grid_res = evaluate_grid(consumption_zone, lat, lon, capacity, project_type)
+            voltage_res = evaluate_voltage(recommended_voltage, recommended_voltage, capacity, project_type)
+            green_res = evaluate_green_direct(project_type, self_use_ratio, recommended_voltage)
+
+            results = [land_res, grid_res, voltage_res, green_res]
+            overall_status = "拦截" if any(item["status"] == "拦截" for item in results) else ("警告" if any(item["status"] == "警告" for item in results) else "通过")
+            risks = build_risks(project_type, capacity, market_participation, self_use_ratio, land_res, grid_res, voltage_res, green_res)
+            
+            # 核心修正：传入分成参数与修复后的底层结算引擎
+            finance = calculate_finance(project_type, capacity, hours, capex_input, mechanism_price, market_price, self_use_price, self_use_ratio, peak_valley_spread, storage_duration if 'storage_duration' in locals() else 2.0, annual_share_wan)
+
+        st.header("📊 项目合规拦截与穿透测算台账")
+
+        if overall_status == "通过": st.success("✅ 初步合规校验通过。")
+        elif overall_status == "警告": st.warning("⚠️ 项目存在合规预警项，需补充支撑性文件。")
+        else: st.error("❌ 项目触发事前合规拦截，建议暂停推进。")
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("用地合规评级", land_res["status"], delta="合规" if land_res["pass"] else "风险")
+        col2.metric("消纳通道状态", grid_res["status"], delta="可继续" if grid_res["pass"] else "拦截")
+        col3.metric("总投资造价预测", f"{finance['capex_wan']:,.0f} 万", delta="资产重资产")
+        
+        # 将净收益在核心指标区重点加粗标出
+        if finance.get("payback_years"):
+            col4.metric("动态抗压回收期", f"{finance['payback_years']:.1f} 年", delta=f"年净流 {finance['net_income_wan']:,.1f} 万")
+        else:
+            col4.metric("动态抗压回收期", "倒挂风险", delta="严重亏损", delta_color="inverse")
+
+        st.subheader("🛡️ 法务风控与合规预警点")
+        for risk in risks:
+            st.markdown(risk)
+
+        st.subheader("📈 财务利润核心解构 (首年)")
+        fin_col1, fin_col2, fin_col3, fin_col4 = st.columns(4)
+        fin_col1.metric("总毛利估算", f"{finance['annual_revenue_wan']:,.1f} 万元", "自用+机制+现货总和")
+        fin_col2.metric("设备运维成本", f"- {finance['opex_wan']:,.1f} 万元", "刚性损耗支出", delta_color="inverse")
+        fin_col3.metric("园区收益让渡", f"- {finance['share_cost_wan']:,.1f} 万元", "重点防范倒挂点", delta_color="inverse")
+        fin_col4.metric("税前净现金流", f"{finance['net_income_wan']:,.1f} 万元", "剥离让利后真实现金流")
+        
+        if finance.get("self_kwh"):
+            st.caption(f"💡 结算明细拆解：自发自用电量替代 {finance['self_kwh']/10000:,.0f}万度 ；余电上网（机制保障+现货） {finance['export_kwh']/10000:,.0f}万度。")
+
+        st.subheader("🗺️ 选址 GIS 核查图")
+        gis_map = render_gis_map(lat, lon, overall_status, project_type, capacity, project_location)
+        st_folium(gis_map, width=850, height=450)
+
+        st.subheader("⚖️ 专家级合同风控与合规边界提示")
+        if share_mode == "模式二：按定额折扣优惠":
+            st.error(f"**核心预警 (定额让利架构风险)**：模型检测到您采用了每年向园区支付定额 {share_fixed} 万元 的效益分享模式。在现货市场频繁出现深度低谷电价，或遭遇恶劣天气导致发电量锐减的极端情境下，若资产端毛利不足以覆盖该固定让利，将导致项目面临严峻的现金流倒挂危机。")
+            st.info("**防范指引**：在《能源管理合同》起草中，必须强行植入“兜底保障免除条款”。设定触发红线（如特定交易周期内现货均价击穿阈值），从而享有暂缓或按比例折减定额分成费用的法定抗辩权。")
+        else:
+            st.success(f"**结构评价 (按电量分成)**：按 {share_vol}万度基准 与 {share_price}元单价 联动的分成模式相对稳健，让资产端与业主的利益实现风险共担。但仍需防范业主方因非计划停产导致的用电量悬崖式下跌引发的纠纷。")
+
+        st.markdown("""
+        * **余电上网政策红利锁定**：模型已严格植入“增量光伏上网电量 80% 享机制电价”的结算底座[cite: 8]。商务端须不遗余力确保项目获批该政策指标，这是对冲现货批发市场负电价的最后护城河。
+        * **偏差罚金追偿权**：现货环境下的不平衡资金及偏差考核罚款不可由管理方单方面兜底。对因园区用电负荷异常震荡导致的偏差罚单，需在协议中明确业主的过错赔偿与分摊责任边界。
+        """)
+
+        st.subheader("📥 投研报告输出")
+        markdown_report = build_markdown_report(project_type, capacity_str, project_location, selected_voltage, land_res, grid_res, voltage_res, green_res, overall_status, risks, finance)
+        st.download_button("下载完整尽调与测算防线报告（Markdown）", data=markdown_report, file_name=f"湖南新能源合规抗压报告_{project_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.md", mime="text/markdown")
+
+    else:
+        st.info("👈 请在左侧完善项目边界条件参数，点击【一键校验并生成合规审查报告】后立即展示评估台账。")
+
+if __name__ == "__main__":
+    main()
